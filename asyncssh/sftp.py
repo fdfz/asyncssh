@@ -2122,8 +2122,8 @@ class SFTPName(Record, Generic[_SFTPNameType]):
 
     """
 
-    filename: _SFTPNameType = cast(_SFTPNameType, '')
-    longname: Union[_SFTPNameType, None] = cast(_SFTPNameType, '')
+    filename: _SFTPNameType
+    longname: Optional[_SFTPNameType] = cast(_SFTPNameType, '')
     attrs: SFTPAttrs = SFTPAttrs()
 
     def _format(self, k: str, v: object) -> Optional[str]:
@@ -2140,7 +2140,14 @@ class SFTPName(Record, Generic[_SFTPNameType]):
     def encode(self, sftp_version: int) -> bytes:
         """Encode an SFTP name as bytes in an SSH packet"""
 
-        longname = String(self.longname) if sftp_version == 3 else b''
+        if sftp_version == 3:
+            if self.longname is None:
+                longname = String(b'' if isinstance(self.filename, bytes)
+                                  else '')
+            else:
+                longname = String(self.longname)
+        else:
+            longname = b''
 
         return (String(self.filename) + longname +
                 self.attrs.encode(sftp_version))
@@ -5572,12 +5579,14 @@ class SFTPClient(Generic[_SFTPPathType]):
         handle = await self._handler.opendir(dirpath)
         at_end = False
 
+        should_decode_to_string = isinstance(path, (str, PurePath))
+
         try:
             while not at_end:
                 names, at_end = await self._handler.readdir(handle)
 
                 for entry in names:
-                    if isinstance(path, (str, PurePath)):
+                    if should_decode_to_string:
                         entry.filename = \
                             self.decode(cast(bytes, entry.filename))
 
@@ -5585,9 +5594,7 @@ class SFTPClient(Generic[_SFTPPathType]):
                             entry.longname = \
                                 self.decode(cast(bytes, entry.longname))
 
-                        yield cast(SFTPName[str], entry)
-                    else:
-                        yield cast(SFTPName[bytes], entry)
+                    yield cast(SFTPName[BytesOrStr], entry)
         except SFTPEOFError:
             pass
         finally:

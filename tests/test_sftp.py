@@ -1143,7 +1143,7 @@ class _TestSFTP(_CheckSFTP):
                     self._check_file('src1', 'dst/src1')
                     self._check_file('src2', 'dst/src2')
                     self._check_file('src3', 'dst/src3')
-                    self.assertGreaterEqual(max_active, 2)
+                    self.assertEqual(max_active, 2)
                 finally:
                     remove('src1 src2 src3 dst')
 

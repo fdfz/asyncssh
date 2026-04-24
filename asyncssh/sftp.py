@@ -4094,9 +4094,10 @@ class SFTPClient:
             return
 
         max_files = min(len(srcnames), max_requests)
-        file_max_requests = max(1, max_requests // max_files)
+        base_requests = max_requests // max_files
+        extra_requests = max_requests % max_files
 
-        async def _copy_src(srcname: SFTPName) -> None:
+        async def _copy_src(srcname: SFTPName, file_max_requests: int) -> None:
             """Copy a source path"""
 
             srcfile = cast(bytes, srcname.filename)
@@ -4114,33 +4115,34 @@ class SFTPClient:
                              block_size, file_max_requests, progress_handler,
                              error_handler, remote_only)
 
-        if max_files == 1:
-            await _copy_src(srcnames[0])
-        else:
-            semaphore = asyncio.Semaphore(max_files)
+        copy_items = [(srcname, base_requests + int(idx < extra_requests))
+                      for idx, srcname in enumerate(srcnames)]
+        semaphore = asyncio.Semaphore(max_files)
 
-            async def _copy_src_limited(srcname: SFTPName) -> None:
-                """Copy a source path with concurrency limits"""
+        async def _copy_src_limited(srcname: SFTPName,
+                                    file_max_requests: int) -> None:
+            """Copy a source path with concurrency limits"""
 
-                async with semaphore:
-                    await _copy_src(srcname)
+            async with semaphore:
+                await _copy_src(srcname, file_max_requests)
 
-            pending = {asyncio.ensure_future(_copy_src_limited(srcname))
-                       for srcname in srcnames}
+        pending = {asyncio.create_task(_copy_src_limited(srcname,
+                                                         file_max_requests))
+                   for srcname, file_max_requests in copy_items}
 
-            while pending:
-                done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_EXCEPTION)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_EXCEPTION)
 
-                for task in done:
-                    exc = task.exception()
+            for task in done:
+                exc = task.exception()
 
-                    if exc:
-                        for pending_task in pending:
-                            pending_task.cancel()
+                if exc:
+                    for pending_task in pending:
+                        pending_task.cancel()
 
-                        await asyncio.gather(*pending, return_exceptions=True)
-                        raise exc
+                    _ = await asyncio.gather(*pending, return_exceptions=True)
+                    raise exc
 
     async def get(self, remotepaths: _SFTPPaths,
                   localpath: Optional[_SFTPPath] = None, *,

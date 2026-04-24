@@ -921,7 +921,7 @@ class _TestSFTP(_CheckSFTP):
             finally:
                 remove('src dst')
 
-        for method in ('mget', 'mput'):
+        for method in ('get', 'put', 'mget', 'mput'):
             with self.subTest(method=method):
                 await _check(method)
 

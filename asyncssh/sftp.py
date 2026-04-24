@@ -4023,11 +4023,13 @@ class SFTPClient:
                 if remote_only and not self.supports_remote_copy:
                     raise SFTPOpUnsupported('Remote copy not supported')
 
-                await _SFTPFileCopier(block_size, max_requests,
-                                      srcattrs.size or 0, sparse,
-                                      srcfs, dstfs, srcpath, dstpath,
-                                      progress_handler,
-                                      request_limiter).run()
+                copy_task = asyncio.create_task(
+                    _SFTPFileCopier(block_size, max_requests,
+                                    srcattrs.size or 0, sparse,
+                                    srcfs, dstfs, srcpath, dstpath,
+                                    progress_handler,
+                                    request_limiter).run())
+                await asyncio.gather(copy_task)
 
             if preserve:
                 attrs = await srcfs.stat(srcpath,

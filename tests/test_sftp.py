@@ -837,6 +837,94 @@ class _TestSFTP(_CheckSFTP):
                     finally:
                         remove('src dst')
 
+    @sftp_test
+    async def test_copy_max_requests_across_multiple_files(self, sftp):
+        """Test max_requests shared across multiple non-recursive files"""
+
+        async def _check(method):
+            active = 0
+            max_active = 0
+            orig_run_task = asyncssh.sftp._SFTPFileCopier.run_task
+
+            async def _track_run_task(self, offset, size):
+                nonlocal active, max_active
+
+                active += 1
+                max_active = max(max_active, active)
+
+                try:
+                    await asyncio.sleep(0.01)
+                    return await orig_run_task(self, offset, size)
+                finally:
+                    active -= 1
+
+            try:
+                for i in range(8):
+                    self._create_file(f'src{i}', 1024*b'x')
+
+                os.mkdir('dst')
+
+                with patch('asyncssh.sftp._SFTPFileCopier.run_task',
+                           _track_run_task):
+                    await getattr(sftp, method)([f'src{i}' for i in range(8)],
+                                                'dst', max_requests=4)
+
+                for i in range(8):
+                    self._check_file(f'src{i}', f'dst/src{i}')
+
+                self.assertGreater(max_active, 1)
+            finally:
+                remove(' '.join(f'src{i}' for i in range(8)) + ' dst')
+
+        for method in ('get', 'put'):
+            with self.subTest(method=method):
+                await _check(method)
+
+    @sftp_test
+    async def test_copy_max_requests_across_recursive_files(self, sftp):
+        """Test max_requests shared across recursive copy operations"""
+
+        async def _check(method):
+            active = 0
+            max_active = 0
+            orig_run_task = asyncssh.sftp._SFTPFileCopier.run_task
+
+            async def _track_run_task(self, offset, size):
+                nonlocal active, max_active
+
+                active += 1
+                max_active = max(max_active, active)
+
+                try:
+                    await asyncio.sleep(0.01)
+                    return await orig_run_task(self, offset, size)
+                finally:
+                    active -= 1
+
+            try:
+                os.mkdir('src')
+
+                for i in range(8):
+                    self._create_file(f'src/file{i}', 1024*b'x')
+
+                os.mkdir('dst')
+
+                with patch('asyncssh.sftp._SFTPFileCopier.run_task',
+                           _track_run_task):
+                    await getattr(sftp, method)('src', 'dst', recurse=True,
+                                                max_requests=4)
+
+                for i in range(8):
+                    self._check_file(f'src/file{i}', f'dst/src/file{i}')
+
+                self.assertGreater(max_active, 1)
+            finally:
+                remove('src dst')
+
+        for method in ('mget', 'mput'):
+            with self.subTest(method=method):
+                await _check(method)
+
     def test_copy_non_remote(self):
         """Test copying without using remote_copy function"""
 

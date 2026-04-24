@@ -4090,7 +4090,16 @@ class SFTPClient:
             raise exc(dstpath.decode('utf-8', 'backslashreplace') +
                       ' must be a directory')
 
-        for srcname in srcnames:
+        if not srcnames:
+            return
+
+        max_files = min(len(srcnames), max_requests)
+        base_requests = max_requests // max_files
+        extra_requests = max_requests % max_files
+
+        async def _copy_src(srcname: SFTPName, file_max_requests: int) -> None:
+            """Copy a source path"""
+
             srcfile = cast(bytes, srcname.filename)
             basename = srcfs.basename(srcfile)
 
@@ -4103,8 +4112,37 @@ class SFTPClient:
 
             await self._copy(srcfs, dstfs, srcfile, dstfile, srcname.attrs,
                              preserve, recurse, follow_symlinks, sparse,
-                             block_size, max_requests, progress_handler,
+                             block_size, file_max_requests, progress_handler,
                              error_handler, remote_only)
+
+        copy_items = [(srcname, base_requests + int(idx < extra_requests))
+                      for idx, srcname in enumerate(srcnames)]
+        semaphore = asyncio.Semaphore(max_files)
+
+        async def _copy_src_limited(srcname: SFTPName,
+                                    file_max_requests: int) -> None:
+            """Copy a source path with concurrency limits"""
+
+            async with semaphore:
+                await _copy_src(srcname, file_max_requests)
+
+        pending = {asyncio.create_task(_copy_src_limited(srcname,
+                                                         file_max_requests))
+                   for srcname, file_max_requests in copy_items}
+
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_EXCEPTION)
+
+            for task in done:
+                exc = task.exception()
+
+                if exc:
+                    for pending_task in pending:
+                        pending_task.cancel()
+
+                    _ = await asyncio.gather(*pending, return_exceptions=True)
+                    raise exc
 
     async def get(self, remotepaths: _SFTPPaths,
                   localpath: Optional[_SFTPPath] = None, *,

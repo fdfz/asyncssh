@@ -1096,6 +1096,57 @@ class _TestSFTP(_CheckSFTP):
                     finally:
                         remove('src1 src2 dst')
 
+    @sftp_test
+    async def test_multiple_copy_max_requests_parallel(self, sftp):
+        """Test max requests across multiple files"""
+
+        for method in ('get', 'put', 'copy'):
+            with self.subTest(method=method):
+                active = 0
+                max_active = 0
+
+                original_copy = sftp._copy
+
+                async def _tracked_copy(srcfs, dstfs, srcpath, dstpath, srcattrs,
+                                        preserve, recurse, follow_symlinks,
+                                        sparse, block_size, max_requests,
+                                        progress_handler, error_handler,
+                                        remote_only):
+                    """Track concurrent copy requests"""
+
+                    nonlocal active, max_active
+
+                    active += 1
+                    max_active = max(max_active, active)
+
+                    try:
+                        await asyncio.sleep(0.01)
+
+                        await original_copy(srcfs, dstfs, srcpath, dstpath,
+                                            srcattrs, preserve, recurse,
+                                            follow_symlinks, sparse, block_size,
+                                            max_requests, progress_handler,
+                                            error_handler, remote_only)
+                    finally:
+                        active -= 1
+
+                try:
+                    self._create_file('src1', 'xxx')
+                    self._create_file('src2', 'yyy')
+                    self._create_file('src3', 'zzz')
+                    os.mkdir('dst')
+
+                    with patch.object(sftp, '_copy', _tracked_copy):
+                        await getattr(sftp, method)(
+                            ['src1', 'src2', 'src3'], 'dst', max_requests=2)
+
+                    self._check_file('src1', 'dst/src1')
+                    self._check_file('src2', 'dst/src2')
+                    self._check_file('src3', 'dst/src3')
+                    self.assertGreaterEqual(max_active, 2)
+                finally:
+                    remove('src1 src2 src3 dst')
+
     @sftp_test_v4
     async def test_multiple_copy_v4(self, sftp):
         """Test copying multiple files over SFTPv4"""

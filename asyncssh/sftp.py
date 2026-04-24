@@ -4090,7 +4090,15 @@ class SFTPClient:
             raise exc(dstpath.decode('utf-8', 'backslashreplace') +
                       ' must be a directory')
 
-        for srcname in srcnames:
+        if not srcnames:
+            return
+
+        max_files = min(len(srcnames), max_requests)
+        file_max_requests = max(1, max_requests // max_files)
+
+        async def _copy_src(srcname: SFTPName) -> None:
+            """Copy a source path"""
+
             srcfile = cast(bytes, srcname.filename)
             basename = srcfs.basename(srcfile)
 
@@ -4103,8 +4111,36 @@ class SFTPClient:
 
             await self._copy(srcfs, dstfs, srcfile, dstfile, srcname.attrs,
                              preserve, recurse, follow_symlinks, sparse,
-                             block_size, max_requests, progress_handler,
+                             block_size, file_max_requests, progress_handler,
                              error_handler, remote_only)
+
+        if max_files == 1:
+            await _copy_src(srcnames[0])
+        else:
+            semaphore = asyncio.Semaphore(max_files)
+
+            async def _copy_src_limited(srcname: SFTPName) -> None:
+                """Copy a source path with concurrency limits"""
+
+                async with semaphore:
+                    await _copy_src(srcname)
+
+            pending = {asyncio.ensure_future(_copy_src_limited(srcname))
+                       for srcname in srcnames}
+
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_EXCEPTION)
+
+                for task in done:
+                    exc = task.exception()
+
+                    if exc:
+                        for pending_task in pending:
+                            pending_task.cancel()
+
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        raise exc
 
     async def get(self, remotepaths: _SFTPPaths,
                   localpath: Optional[_SFTPPath] = None, *,

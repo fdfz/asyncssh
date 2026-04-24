@@ -846,7 +846,7 @@ class _SFTPFileCopier(_SFTPParallelIO[int]):
                  sparse: bool, srcfs: _SFTPFSProtocol, dstfs: _SFTPFSProtocol,
                  srcpath: bytes, dstpath: bytes,
                  progress_handler: SFTPProgressHandler,
-                 request_limiter: Optional['asyncio.Semaphore'] = None):
+                 request_limiter: Optional[asyncio.Semaphore] = None):
         super().__init__(block_size, max_requests, 0, 0)
 
         self._sparse = sparse
@@ -872,12 +872,14 @@ class _SFTPFileCopier(_SFTPParallelIO[int]):
         assert self._dst is not None
 
         if self._request_limiter:
-            async with self._request_limiter:
-                data = await self._src.read(size, offset)
-                await self._dst.write(data, offset)
-        else:
+            await self._request_limiter.acquire()
+
+        try:
             data = await self._src.read(size, offset)
             await self._dst.write(data, offset)
+        finally:
+            if self._request_limiter:
+                self._request_limiter.release()
 
         datalen = len(data)
 
@@ -3958,7 +3960,7 @@ class SFTPClient:
                     sparse: bool, block_size: int, max_requests: int,
                     progress_handler: SFTPProgressHandler,
                     error_handler: SFTPErrorHandler,
-                    request_limiter: Optional['asyncio.Semaphore'],
+                    request_limiter: Optional[asyncio.Semaphore],
                     remote_only: bool) -> None:
         """Copy a file, directory, or symbolic link"""
 
@@ -3983,7 +3985,7 @@ class SFTPClient:
                 if not await dstfs.isdir(dstpath):
                     await dstfs.mkdir(dstpath)
 
-                copy_tasks: List['asyncio.Task[None]'] = []
+                copy_tasks: List[asyncio.Task[None]] = []
 
                 async for srcname in srcfs.scandir(srcpath):
                     filename = cast(bytes, srcname.filename)
@@ -3994,7 +3996,7 @@ class SFTPClient:
                     srcfile = posixpath.join(srcpath, filename)
                     dstfile = posixpath.join(dstpath, filename)
 
-                    copy_tasks.append(asyncio.ensure_future(
+                    copy_tasks.append(asyncio.create_task(
                         self._copy(srcfs, dstfs, srcfile, dstfile,
                                    srcname.attrs, preserve, recurse,
                                    follow_symlinks, sparse, block_size,
@@ -4108,7 +4110,7 @@ class SFTPClient:
                       ' must be a directory')
 
         request_limiter = asyncio.Semaphore(max_requests)
-        copy_tasks: List['asyncio.Task[None]'] = []
+        copy_tasks: List[asyncio.Task[None]] = []
 
         for srcname in srcnames:
             srcfile = cast(bytes, srcname.filename)
@@ -4121,7 +4123,7 @@ class SFTPClient:
             else:
                 dstfile = dstpath
 
-            copy_tasks.append(asyncio.ensure_future(
+            copy_tasks.append(asyncio.create_task(
                 self._copy(srcfs, dstfs, srcfile, dstfile, srcname.attrs,
                            preserve, recurse, follow_symlinks, sparse,
                            block_size, max_requests, progress_handler,

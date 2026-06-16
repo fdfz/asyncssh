@@ -39,7 +39,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, AnyStr, Awaitable, Callable, Dict
 from typing import Generic, List, Mapping, Optional, Sequence, Set, Tuple
-from typing import Type, TypeVar, Union, cast
+from typing import Type, TypeVar, Union, cast, overload
 from typing_extensions import Protocol, Self
 
 from .agent import SSHAgentClient, SSHAgentListener
@@ -5716,12 +5716,29 @@ class SSHClientConnection(SSHConnection):
 
         return cast(SSHForwarder, peer)
 
+    @overload
+    async def start_sftp_client(self, env: DefTuple[Optional[Env]] = (),
+                                send_env: DefTuple[Optional[EnvSeq]] = (),
+                                path_encoding: str = 'utf-8',
+                                path_errors = 'strict',
+                                sftp_version = MIN_SFTP_VERSION) -> \
+            SFTPClient[str]: ... # pragma: no cover
+
+    @overload
+    async def start_sftp_client(self, env: DefTuple[Optional[Env]] = (),
+                                send_env: DefTuple[Optional[EnvSeq]] = (),
+                                path_encoding: None = None,
+                                path_errors = 'strict',
+                                sftp_version = MIN_SFTP_VERSION) -> \
+            SFTPClient[bytes]: ... # pragma: no cover
+
     @async_context_manager
     async def start_sftp_client(self, env: DefTuple[Optional[Env]] = (),
                                 send_env: DefTuple[Optional[EnvSeq]] = (),
                                 path_encoding: Optional[str] = 'utf-8',
                                 path_errors = 'strict',
-                                sftp_version = MIN_SFTP_VERSION) -> SFTPClient:
+                                sftp_version = MIN_SFTP_VERSION) -> \
+            Union[SFTPClient[str], SFTPClient[bytes]]:
         """Start an SFTP client
 
            This method is a coroutine which attempts to start a secure

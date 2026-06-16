@@ -154,7 +154,7 @@ _SFTPStatFunc = Callable[[_SFTPPath], Awaitable['SFTPAttrs']]
 
 _SFTPClientFileOrPath = Union['SFTPClientFile', _SFTPPath]
 
-_SFTPNames = Tuple[Sequence['SFTPName'], bool]
+_SFTPNames = Tuple[Sequence['SFTPName[bytes]'], bool]
 _SFTPOSAttrs = Union[os.stat_result, 'SFTPAttrs']
 _SFTPOSVFSAttrs = Union[os.statvfs_result, 'SFTPVFSAttrs']
 
@@ -166,6 +166,8 @@ SFTPErrorHandler = Union[None, Literal[False], Callable[[Exception], None]]
 SFTPProgressHandler = Optional[Callable[[bytes, bytes, int, int], None]]
 
 _T = TypeVar('_T')
+_SFTPPathType = TypeVar('_SFTPPathType', str, bytes)
+_SFTPNameType = TypeVar('_SFTPNameType', str, bytes)
 
 
 MIN_SFTP_VERSION = 3
@@ -225,7 +227,7 @@ class _SFTPGlobProtocol(Protocol):
     async def stat(self, path: bytes) -> 'SFTPAttrs':
         """Get attributes of a file"""
 
-    def scandir(self, path: bytes) -> AsyncIterator['SFTPName']:
+    def scandir(self, path: bytes) -> AsyncIterator['SFTPName[bytes]']:
         """Return names and attributes of the files in a directory"""
 
 
@@ -283,7 +285,7 @@ class _SFTPFSProtocol(Protocol):
     async def isdir(self, path: bytes) -> bool:
         """Return if the path refers to a directory"""
 
-    def scandir(self, path: bytes) -> AsyncIterator['SFTPName']:
+    def scandir(self, path: bytes) -> AsyncIterator['SFTPName[bytes]']:
         """Return names and attributes of the files in a directory"""
 
     async def mkdir(self, path: bytes) -> None:
@@ -2102,7 +2104,7 @@ class SFTPVFSAttrs(Record):
                    result.f_namemax)
 
 
-class SFTPName(Record):
+class SFTPName(Record, Generic[_SFTPNameType]):
     """SFTP file name and attributes
 
        SFTPName is a simple record class with the following fields:
@@ -2120,8 +2122,8 @@ class SFTPName(Record):
 
     """
 
-    filename: BytesOrStr = ''
-    longname: BytesOrStr = ''
+    filename: _SFTPNameType
+    longname: Optional[_SFTPNameType] = cast(_SFTPNameType, '')
     attrs: SFTPAttrs = SFTPAttrs()
 
     def _format(self, k: str, v: object) -> Optional[str]:
@@ -2138,13 +2140,21 @@ class SFTPName(Record):
     def encode(self, sftp_version: int) -> bytes:
         """Encode an SFTP name as bytes in an SSH packet"""
 
-        longname = String(self.longname) if sftp_version == 3 else b''
+        if sftp_version == 3:
+            if self.longname is None:
+                longname = String(b'' if isinstance(self.filename, bytes)
+                                  else '')
+            else:
+                longname = String(self.longname)
+        else:
+            longname = b''
 
         return (String(self.filename) + longname +
                 self.attrs.encode(sftp_version))
 
     @classmethod
-    def decode(cls, packet: SSHPacket, sftp_version: int) -> 'SFTPName':
+    def decode(cls, packet: SSHPacket, sftp_version: int) -> \
+            'SFTPName[bytes]':
         """Decode bytes in an SSH packet as an SFTP name"""
 
         filename = packet.get_string()
@@ -3820,7 +3830,7 @@ class SFTPClientFile:
             self._handle = None
 
 
-class SFTPClient:
+class SFTPClient(Generic[_SFTPPathType]):
     """SFTP client
 
        This class represents the client side of an SFTP session. It is
@@ -3829,6 +3839,14 @@ class SFTPClient:
        :class:`SSHClientConnection` class.
 
     """
+
+    @overload
+    def __init__(self: 'SFTPClient[str]', handler: SFTPClientHandler,
+                 path_encoding: str, path_errors: str): ...
+
+    @overload
+    def __init__(self: 'SFTPClient[bytes]', handler: SFTPClientHandler,
+                 path_encoding: None, path_errors: str): ...
 
     def __init__(self, handler: SFTPClientHandler,
                  path_encoding: Optional[str], path_errors: str):
@@ -5529,7 +5547,16 @@ class SFTPClient:
         newpath = self.compose_path(newpath)
         await self._handler.posix_rename(oldpath, newpath)
 
-    async def scandir(self, path: _SFTPPath = '.') -> AsyncIterator[SFTPName]:
+    @overload
+    async def scandir(self: 'SFTPClient[str]', path: FilePath = ...) -> \
+            AsyncIterator[SFTPName[str]]: ... # pragma: no cover
+
+    @overload
+    async def scandir(self, path: bytes) -> \
+            AsyncIterator[SFTPName[bytes]]: ... # pragma: no cover
+
+    async def scandir(self, path: _SFTPPath = '.') -> \
+            AsyncIterator[SFTPName[BytesOrStr]]:
         """Return names and attributes of the files in a remote directory
 
            This method reads the contents of a directory, returning
@@ -5552,12 +5579,14 @@ class SFTPClient:
         handle = await self._handler.opendir(dirpath)
         at_end = False
 
+        should_decode_to_string = isinstance(path, (str, PurePath))
+
         try:
             while not at_end:
                 names, at_end = await self._handler.readdir(handle)
 
                 for entry in names:
-                    if isinstance(path, (str, PurePath)):
+                    if should_decode_to_string:
                         entry.filename = \
                             self.decode(cast(bytes, entry.filename))
 
@@ -5565,13 +5594,22 @@ class SFTPClient:
                             entry.longname = \
                                 self.decode(cast(bytes, entry.longname))
 
-                    yield entry
+                    yield cast(SFTPName[BytesOrStr], entry)
         except SFTPEOFError:
             pass
         finally:
             await self._handler.close(handle)
 
-    async def readdir(self, path: _SFTPPath = '.') -> Sequence[SFTPName]:
+    @overload
+    async def readdir(self: 'SFTPClient[str]', path: FilePath = ...) -> \
+            Sequence[SFTPName[str]]: ... # pragma: no cover
+
+    @overload
+    async def readdir(self, path: bytes) -> \
+            Sequence[SFTPName[bytes]]: ... # pragma: no cover
+
+    async def readdir(self, path: _SFTPPath = '.') -> \
+            Sequence[SFTPName[BytesOrStr]]:
         """Read the contents of a remote directory
 
            This method reads the contents of a directory, returning
@@ -5743,7 +5781,7 @@ class SFTPClient:
             return self.decode(cast(bytes, names[0].filename),
                                isinstance(path, (str, PurePath)))
 
-    async def getcwd(self) -> BytesOrStr:
+    async def getcwd(self) -> _SFTPPathType:
         """Return the current remote working directory
 
            :returns: The current remote working directory, decoded using
@@ -5756,7 +5794,7 @@ class SFTPClient:
         if self._cwd is None:
             self._cwd = await self.realpath(b'.')
 
-        return self.decode(self._cwd)
+        return cast(_SFTPPathType, self.decode(self._cwd))
 
     async def chdir(self, path: _SFTPPath) -> None:
         """Change the current remote working directory
@@ -8207,13 +8245,34 @@ class SFTPServerFS:
         return SFTPServerFile(self._server, file_obj)
 
 
+@overload
+async def start_sftp_client(conn: 'SSHClientConnection',
+                            loop: asyncio.AbstractEventLoop,
+                            utf8_decode_errors: str,
+                            reader: 'SSHReader[bytes]',
+                            writer: 'SSHWriter[bytes]',
+                            path_encoding: str,
+                            path_errors: str, sftp_version: int) -> \
+        SFTPClient[str]: ... # pragma: no cover
+
+@overload
+async def start_sftp_client(conn: 'SSHClientConnection',
+                            loop: asyncio.AbstractEventLoop,
+                            utf8_decode_errors: str,
+                            reader: 'SSHReader[bytes]',
+                            writer: 'SSHWriter[bytes]',
+                            path_encoding: None,
+                            path_errors: str, sftp_version: int) -> \
+        SFTPClient[bytes]: ... # pragma: no cover
+
 async def start_sftp_client(conn: 'SSHClientConnection',
                             loop: asyncio.AbstractEventLoop,
                             utf8_decode_errors: str,
                             reader: 'SSHReader[bytes]',
                             writer: 'SSHWriter[bytes]',
                             path_encoding: Optional[str],
-                            path_errors: str, sftp_version: int) -> SFTPClient:
+                            path_errors: str, sftp_version: int) -> \
+        Union[SFTPClient[str], SFTPClient[bytes]]:
     """Start an SFTP client"""
 
     handler = SFTPClientHandler(loop, utf8_decode_errors,
